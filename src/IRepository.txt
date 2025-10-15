@@ -1,0 +1,20 @@
+#nullable enable
+using BigIronRail.Blazor.BusinessObjects;
+
+namespace BigIronRail.Blazor.Data.Repository
+{
+    public interface IRepository
+    {
+        // Car + Company
+        Task<List<CarMaster>> GetAllCarMastersByCompanyIdAsync(int companyMasterId, CancellationToken ct = default);
+        Task<CompanyMaster?> GetCompanyByIdAsync(int companyMasterId, CancellationToken ct = default);
+        Task ToggleActiveCarMaster(int carMasterId, CancellationToken ct = default);
+        Task<bool> DeleteCarCascadeAsync(int carMasterId, bool deleteDepartmentsToo = true, CancellationToken ct = default);
+
+        // Sightings summary (master + details grid)
+        Task<List<SightingSummary>> GetGroupedCarSummariesAsync(int companyMasterId, CancellationToken ct = default);
+
+        // Order/Product pairs for the selected car
+        Task<List<OrderProductPair>> GetOrderProductsForCarAsync(int carMasterId, CancellationToken ct = default);
+    }
+}
