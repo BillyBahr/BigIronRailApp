@@ -1,0 +1,209 @@
+#nullable enable
+using BigIronRail.Blazor.BusinessObjects;
+using Microsoft.EntityFrameworkCore;
+
+namespace BigIronRail.Blazor.Data.Repository
+{
+    /// <summary>
+    /// Lightweight EF Core repository: async, no raw SQL, efficient projections.
+    /// Designed for demo/portfolio use—safe to share publicly.
+    /// </summary>
+    public sealed class Repository : IRepository
+    {
+        private readonly TheDbContext _db;
+        public Repository(TheDbContext db) => _db = db;
+
+        // -----------------------------
+        // Car + Company
+        // -----------------------------
+        public async Task<List<CarMaster>> GetAllCarMastersByCompanyIdAsync(int companyMasterId, CancellationToken ct = default)
+        {
+            return await _db.CarMaster
+                .AsNoTracking()
+                .Where(c => c.CompanyMasterId == companyMasterId)
+                .OrderBy(c => c.CarName)
+                .ToListAsync(ct);
+        }
+
+        public async Task<CompanyMaster?> GetCompanyByIdAsync(int companyMasterId, CancellationToken ct = default)
+        {
+            return await _db.CompanyMaster
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.CompanyMasterId == companyMasterId, ct);
+        }
+
+        public async Task ToggleActiveCarMaster(int carMasterId, CancellationToken ct = default)
+        {
+            var car = await _db.CarMaster.FirstOrDefaultAsync(c => c.CarMasterId == carMasterId, ct);
+            if (car is null) return;
+
+            car.IsActive = !car.IsActive;
+            car.DateUpdated = DateTime.UtcNow;
+            await _db.SaveChangesAsync(ct);
+        }
+
+        /// <summary>
+        /// Minimal, safe cascade delete:
+        /// - Removes link rows (orders/products under the car)
+        /// - Optionally drops department link/row if unused elsewhere
+        /// - Deletes the car itself
+        /// Assumes proper FKs; adjust if your schema differs.
+        /// </summary>
+        public async Task<bool> DeleteCarCascadeAsync(int carMasterId, bool deleteDepartmentsToo = true, CancellationToken ct = default)
+        {
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+            var car = await _db.CarMaster
+                .FirstOrDefaultAsync(c => c.CarMasterId == carMasterId, ct);
+
+            if (car is null) return false;
+
+            // Remove Products for Orders belonging to this car
+            var orderIds = await _db.Set<Order>()
+                .AsNoTracking()
+                .Where(o => o.CarMasterId == carMasterId)
+                .Select(o => o.OrderId)
+                .ToListAsync(ct);
+
+            if (orderIds.Count > 0)
+            {
+                var products = _db.Set<Product>().Where(p => orderIds.Contains(p.OrderId));
+                _db.RemoveRange(products);
+
+                var orders = _db.Set<Order>().Where(o => orderIds.Contains(o.OrderId));
+                _db.RemoveRange(orders);
+            }
+
+            // Optional: remove Department if exclusively used by this car
+            if (deleteDepartmentsToo && car.DepartmentId > 0)
+            {
+                var deptId = car.DepartmentId;
+                var usedElsewhere = await _db.CarMaster
+                    .AsNoTracking()
+                    .AnyAsync(c => c.DepartmentId == deptId && c.CarMasterId != carMasterId, ct);
+
+                if (!usedElsewhere)
+                {
+                    var dept = await _db.Department.FirstOrDefaultAsync(d => d.DepartmentId == deptId, ct);
+                    if (dept is not null)
+                        _db.Department.Remove(dept);
+                }
+            }
+
+            // Finally remove car
+            _db.CarMaster.Remove(car);
+            await _db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+
+            return true;
+        }
+
+        // -----------------------------
+        // Sightings summary
+        // -----------------------------
+        public async Task<List<SightingSummary>> GetGroupedCarSummariesAsync(int companyMasterId, CancellationToken ct = default)
+        {
+            // If your sightings live in TransactionMaster, just change _db.Sightings to _db.TransactionMaster and map fields below.
+            var query =
+                from car in _db.CarMaster.AsNoTracking()
+                where car.CompanyMasterId == companyMasterId
+                join s in _db.Sightings.AsNoTracking() on car.CarMasterId equals s.CarMasterId into grp
+                select new
+                {
+                    Car = car,
+                    Details = grp
+                };
+
+            var result = await query
+                .Select(x => new SightingSummary
+                {
+                    CarMasterId = x.Car.CarMasterId,
+                    CarName     = x.Car.CarName,
+                    IsActive    = x.Car.IsActive,
+
+                    // Example of server-side date math (SQL-translated); adjust field names accordingly.
+                    DaysRolling = x.Details.Any()
+                        ? EF.Functions.DateDiffDay(
+                            x.Details.Min(d => d.SightingDate),
+                            x.Details.Max(d => d.SightingDate))
+                        : 0,
+
+                    DepartmentName = x.Details
+                        .OrderByDescending(d => d.SightingDate)
+                        .Select(d => d.Department!.DepartmentName)
+                        .FirstOrDefault() ?? string.Empty,
+
+                    OrderDisplay = x.Details
+                        .OrderByDescending(d => d.SightingDate)
+                        .Select(d => d.Order!.OrderName)
+                        .FirstOrDefault() ?? string.Empty,
+
+                    ProductDisplay = x.Details
+                        .OrderByDescending(d => d.SightingDate)
+                        .Select(d => d.Product!.ProductName)
+                        .FirstOrDefault() ?? string.Empty,
+
+                    CurrentLoadEmpty = x.Details
+                        .OrderByDescending(d => d.SightingDate)
+                        .Select(d => d.LoadEmpty)
+                        .FirstOrDefault() ?? x.Car.LastProduct, // fallback to car field if you keep it there
+
+                    LastSightingDate = x.Details
+                        .OrderByDescending(d => d.SightingDate)
+                        .Select(d => d.SightingDate)
+                        .FirstOrDefault(),
+
+                    LastSightingTimeFormatted = x.Details
+                        .OrderByDescending(d => d.SightingDate)
+                        .Select(d => d.SightingTimeFormatted)
+                        .FirstOrDefault(),
+
+                    // Child grid payload, projected leanly
+                    Details = x.Details
+                        .OrderByDescending(d => d.SightingDate)
+                        .Select(d => new SightingDetail
+                        {
+                            SightingDateFormatted       = d.SightingDateFormatted,
+                            SightingTimeFormatted       = d.SightingTimeFormatted,
+                            SightingCodeClassification  = d.SightingCodeClassification,
+                            LoadEmpty                   = d.LoadEmpty,
+                            SightingCity                = d.SightingCity,
+                            SightingState               = d.SightingState,
+                            Road                        = d.Road,
+                            DestinationState            = d.DestinationState
+                        })
+                        .ToList()
+                })
+                .OrderBy(s => s.CarName)
+                .ToListAsync(ct);
+
+            return result;
+        }
+
+        // -----------------------------
+        // Orders / Products for car
+        // -----------------------------
+        public async Task<List<OrderProductPair>> GetOrderProductsForCarAsync(int carMasterId, CancellationToken ct = default)
+        {
+            // LEFT JOIN: keep orders even if they currently have no products
+            var q =
+                from ord in _db.Set<Order>().AsNoTracking()
+                where ord.CarMasterId == carMasterId && ord.IsActive
+                join prod in _db.Set<Product>().AsNoTracking() on ord.OrderId equals prod.OrderId into prodJoin
+                from prod in prodJoin.DefaultIfEmpty()
+                where prod == null || prod.IsActive
+                select new OrderProductPair
+                {
+                    OrderId     = ord.OrderId,
+                    OrderName   = ord.OrderName ?? string.Empty,
+                    ProductId   = prod != null ? prod.ProductId : 0,
+                    ProductName = prod != null ? (prod.ProductName ?? string.Empty) : string.Empty
+                };
+
+            return await q
+                .OrderBy(x => x.OrderName)
+                .ThenBy(x => x.ProductName)
+                .ToListAsync(ct);
+        }
+    }
+}
