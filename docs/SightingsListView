@@ -1,1 +1,477 @@
+@page "/Cars/SightingListView"
+@rendermode InteractiveServer
 
+@using BigIronRail.Blazor.BusinessObjects
+@using BigIronRail.Blazor.Components.Account
+@using BigIronRail.Blazor.Data
+@using BigIronRail.Blazor.Data.Repository
+@using BigIronRail.Blazor.Services
+@using Blazorise
+@using Blazorise.DataGrid
+@using Blazorise.LoadingIndicator
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.JSInterop
+
+@inject UserManager<ApplicationUser> UserManager
+@inject SignInManager<ApplicationUser> SignInManager
+@inject IdentityUserAccessor UserAccessor
+@inject UserState UserState
+@inject IRepository Repository
+@inject NavigationManager Navigation
+@inject IUserProvisioningService ProvisioningService
+@inject LoadCurrentUser LoadCurrentUser
+@inject ExcelExportService ExcelExportService
+@inject IJSRuntime JSRuntime
+
+<style>
+/* TODO: move to SightingListView.razor.css */
+.grid-box{border:1px solid #000;background:#f5f5f5;border-radius:4px;padding:.5rem}
+.toolbar{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem}
+.w-auto{width:auto}
+.highlight-dropdown{background:#fffacd}
+.datepick-wrap{position:relative;display:inline-block}
+.active-pill,.inactive-pill{display:inline-block;padding:5px;border-radius:4px}
+.active-pill{background:#d4edda}
+.inactive-pill{background:#f8d7da}
+.hover-hint{font-size:small;font-style:italic;line-height:1;margin-bottom:.125rem}
+.hover-hint:not(.title-red):not(.text-danger){color:#dc3545}
+.export-button{margin-right:1rem}
+</style>
+
+<h1>Current Sightings</h1>
+
+<Modal @ref="confirmationModal" Visible="@showConfirmationModal" Backdrop="Backdrop.True">
+    <ModalContent>
+        <ModalHeader>@confirmationTitle</ModalHeader>
+        <ModalBody>@confirmationMessage</ModalBody>
+        <ModalFooter>
+            <Button Color="Color.Primary" @onclick="CloseModal">OK</Button>
+        </ModalFooter>
+    </ModalContent>
+</Modal>
+
+<LoadingIndicator @bind-Visible="@IsLoading" SpinnerColor="Color.Danger" BackgroundColor="Background.White">
+    @if (CarSummaries.Any())
+    {
+        <div class="toolbar">
+            <Button Color="Color.Success" Class="export-button" Clicked="ExportToExcel">
+                Export to Excel
+            </Button>
+
+            <div class="ms-auto d-flex align-items-center gap-2">
+                <label for="masterPageSize" class="form-label m-0">Rows per page:</label>
+                <select id="masterPageSize" class="form-select form-select-sm w-auto highlight-dropdown" @bind="masterPageSize">
+                    <option value="5">5</option>
+                    <option value="10">10</option>
+                    <option value="20">20</option>
+                    <option value="50">50</option>
+                    <option value="-1">All</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="grid-box">
+            <p class="hover-hint">* Hover over data to see all entries</p>
+
+            <DataGrid TItem="SightingSummary"
+                      Data="@CarSummaries"
+                      Sortable
+                      Filterable
+                      Responsive
+                      Striped
+                      Dense
+                      ShowPager
+                      PageSize="@MasterPageSizeEffective"
+                      @bind-SelectedRow="SelectedCar">
+
+                <DataGridColumns>
+                    <DataGridColumn TItem="SightingSummary"
+                                    Field="@nameof(SightingSummary.CarName)"
+                                    Caption="Car Name">
+                        <DisplayTemplate Context="row">
+                            @FormatCarName(row.CarName)
+                        </DisplayTemplate>
+                    </DataGridColumn>
+
+                    <DataGridColumn TItem="SightingSummary"
+                                    Field="@nameof(SightingSummary.IsActive)"
+                                    Caption="Active"
+                                    Sortable
+                                    Filterable="false">
+                        <DisplayTemplate Context="row">
+                            <div class="@(row.IsActive ? "active-pill" : "inactive-pill")">
+                                @(row.IsActive ? "Active" : "Inactive")
+                            </div>
+                        </DisplayTemplate>
+                    </DataGridColumn>
+
+                    <DataGridColumn TItem="SightingSummary" Field="@nameof(SightingSummary.DaysRolling)" Caption="Days Rolling" />
+
+                    <DataGridColumn TItem="SightingSummary" Field="@nameof(SightingSummary.DepartmentName)" Caption="Department" Sortable Filterable>
+                        <DisplayTemplate Context="row">
+                            <span>@row.DepartmentName</span>
+                        </DisplayTemplate>
+                    </DataGridColumn>
+
+                    <DataGridColumn TItem="SightingSummary" Field="@nameof(SightingSummary.OrderDisplay)" Caption="* Order" Sortable Filterable>
+                        <DisplayTemplate Context="row">
+                            <span title="@row.OrderTooltip">@row.OrderDisplay</span>
+                        </DisplayTemplate>
+                    </DataGridColumn>
+
+                    <DataGridColumn TItem="SightingSummary" Field="@nameof(SightingSummary.ProductDisplay)" Caption="* Product" Sortable Filterable>
+                        <DisplayTemplate Context="row">
+                            <span title="@row.ProductTooltip">@row.ProductDisplay</span>
+                        </DisplayTemplate>
+                    </DataGridColumn>
+
+                    <DataGridColumn TItem="SightingSummary" Field="@nameof(SightingSummary.CurrentLoadEmpty)" Caption="Current Load/Empty" />
+                </DataGridColumns>
+            </DataGrid>
+        </div>
+
+        @if (SelectedCar is not null)
+        {
+            <!-- Details grid -->
+            <div class="grid-box mt-3">
+                <div class="toolbar flex-wrap">
+                    <h5 class="m-0">
+                        @SelectedCar.CarName
+                        <small class="text-muted">
+                            — Last seen: @SelectedCar.LastSightingDate?.ToString("MM/dd/yy") @SelectedCar.LastSightingTimeFormatted
+                        </small>
+                    </h5>
+
+                    <div class="d-flex align-items-center gap-3 ms-auto flex-wrap">
+                        <Field>
+                            <FieldLabel>From</FieldLabel>
+                            <div class="datepick-wrap">
+                                <DatePicker TValue="DateTime?" Date="@filterFromDetail" DateChanged="OnDetailFromChanged" />
+                            </div>
+                        </Field>
+
+                        <Field>
+                            <FieldLabel>To</FieldLabel>
+                            <div class="datepick-wrap">
+                                <DatePicker TValue="DateTime?" Date="@filterToDetail" DateChanged="OnDetailToChanged" />
+                            </div>
+                        </Field>
+
+                        <div class="d-flex align-items-center gap-2">
+                            <Button class="btn btn-slate btn-sm" Clicked="ClearDetailFilters">Clear Filters</Button>
+                        </div>
+
+                        <div class="d-flex align-items-center gap-2">
+                            <label for="detailPageSize" class="form-label m-0">Rows per page:</label>
+                            <select id="detailPageSize" class="form-select form-select-sm w-auto highlight-dropdown" @bind="detailPageSize">
+                                <option value="5">5</option>
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                                <option value="50">50</option>
+                                <option value="-1">All</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                @if (FilteredDetails.Any())
+                {
+                    <DataGrid TItem="SightingDetail"
+                              Data="@FilteredDetails"
+                              ShowPager
+                              PageSize="@DetailPageSizeEffective"
+                              Sortable
+                              Filterable
+                              Responsive
+                              Striped
+                              Dense>
+                        <DataGridColumns>
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.SightingDateFormatted)" Caption="Sighting Date" />
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.SightingTimeFormatted)" Caption="Sighting Time" />
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.SightingCodeClassification)" Caption="Sighting Code" />
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.LoadEmpty)" Caption="Loaded/Empty" />
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.SightingCity)" Caption="Sighting City" />
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.SightingState)" Caption="Sighting State" />
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.Road)" Caption="Rail Road" />
+                            <DataGridColumn TItem="SightingDetail" Field="@nameof(SightingDetail.DestinationState)" Caption="Destination State" />
+                        </DataGridColumns>
+                    </DataGrid>
+                }
+                else
+                {
+                    <div class="text-muted">No sightings in the selected window.</div>
+                }
+            </div>
+
+            <!-- Order/Product grid -->
+            <div class="grid-box mt-3">
+                <div class="toolbar">
+                    <h6 class="m-0">Assigned Orders & Products</h6>
+
+                    <div class="ms-auto d-flex align-items-center gap-2">
+                        <label for="orderProdPageSize" class="form-label m-0">Rows per page:</label>
+                        <select id="orderProdPageSize" class="form-select form-select-sm w-auto highlight-dropdown" @bind="orderProdPageSize">
+                            <option value="5">5</option>
+                            <option value="10">10</option>
+                            <option value="20">20</option>
+                            <option value="50">50</option>
+                            <option value="-1">All</option>
+                        </select>
+                    </div>
+                </div>
+
+                @if (OrderProducts?.Any() == true)
+                {
+                    <DataGrid TItem="OrderProductPair"
+                              Data="@OrderProducts"
+                              ShowPager
+                              PageSize="@OrderProdPageSizeEffective"
+                              Sortable
+                              Filterable="false"
+                              Responsive
+                              Striped
+                              Dense>
+                        <DataGridColumns>
+                            <DataGridColumn TItem="OrderProductPair" Field="@nameof(OrderProductPair.OrderName)" Caption="Order" />
+                            <DataGridColumn TItem="OrderProductPair" Field="@nameof(OrderProductPair.ProductName)" Caption="Product" />
+                        </DataGridColumns>
+                    </DataGrid>
+                }
+                else
+                {
+                    <div class="text-muted">
+                        No Orders/Products assignments for this car@(SelectedCar is not null ? $": {SelectedCar.CarName}" : "").
+                    </div>
+                }
+            </div>
+        }
+    }
+</LoadingIndicator>
+
+@if (!string.IsNullOrWhiteSpace(ErrorMessage))
+{
+    <div class="alert alert-danger mt-3">@ErrorMessage</div>
+}
+
+@code {
+    // ---------- State ----------
+    private List<SightingSummary> CarSummaries { get; set; } = new();
+    private List<OrderProductPair> OrderProducts { get; set; } = new();
+
+    private SightingSummary? _selectedCar;
+    private SightingSummary? SelectedCar
+    {
+        get => _selectedCar;
+        set
+        {
+            if (_selectedCar?.CarMasterId != value?.CarMasterId)
+            {
+                _selectedCar = value;
+                _ = LoadOrderProductsAsync();
+                PreloadDetailDateRange();
+                StateHasChanged();
+            }
+            else
+            {
+                _selectedCar = value;
+            }
+        }
+    }
+
+    private string? ErrorMessage { get; set; }
+    public bool IsLoading { get; set; }
+
+    private int masterPageSize = 5;
+    private int detailPageSize = 5;
+    private int orderProdPageSize = 5;
+
+    private DateTime? filterFromDetail;
+    private DateTime? filterToDetail;
+
+    private int MasterPageSizeEffective => masterPageSize == -1 ? Math.Max(CarSummaries.Count, 1) : masterPageSize;
+    private int DetailPageSizeEffective => detailPageSize == -1 ? Math.Max(FilteredDetails.Count(), 1) : detailPageSize;
+    private int OrderProdPageSizeEffective => orderProdPageSize == -1 ? Math.Max(OrderProducts.Count, 1) : orderProdPageSize;
+
+    // ---------- Derived ----------
+    private IEnumerable<SightingDetail> FilteredDetails
+        => (SelectedCar?.Details ?? Enumerable.Empty<SightingDetail>()).Where(FilterDetailByDate);
+
+    private static bool TryParseMmDdYy(string? s, out DateTime dt)
+        => DateTime.TryParseExact(s ?? "", "MM/dd/yy", null, System.Globalization.DateTimeStyles.None, out dt);
+
+    private bool FilterDetailByDate(SightingDetail d)
+    {
+        if (!filterFromDetail.HasValue && !filterToDetail.HasValue) return true;
+        if (!TryParseMmDdYy(d.SightingDateFormatted, out var dt)) return false;
+
+        var from = filterFromDetail?.Date;
+        var toExclusive = filterToDetail?.Date.AddDays(1);
+        var afterFrom = !from.HasValue || dt.Date >= from.Value;
+        var beforeTo = !toExclusive.HasValue || dt.Date < toExclusive.Value;
+        return afterFrom && beforeTo;
+    }
+
+    // ---------- UI Helpers ----------
+    private Modal? confirmationModal;
+    private string confirmationTitle = "Sighting Notice";
+    private string confirmationMessage = "There are no active/rolling cars with sightings.";
+    private bool showConfirmationModal;
+
+    private static string FormatCarName(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+        var i = 0;
+        while (i < raw.Length && char.IsLetter(raw[i])) i++;
+        return (i > 0 && i < raw.Length) ? raw.Insert(i, " ") : raw;
+    }
+
+    private void CloseModal() => showConfirmationModal = false;
+
+    private void PreloadDetailDateRange()
+    {
+        var details = SelectedCar?.Details ?? Enumerable.Empty<SightingDetail>();
+        var dates = details
+            .Select(d => TryParseMmDdYy(d.SightingDateFormatted, out var dt) ? dt.Date : (DateTime?)null)
+            .Where(d => d.HasValue)
+            .Select(d => d!.Value)
+            .ToList();
+
+        if (dates.Count > 0)
+        {
+            filterFromDetail = dates.Min();
+            filterToDetail = dates.Max();
+        }
+        else
+        {
+            filterFromDetail = null;
+            filterToDetail = null;
+        }
+    }
+
+    // ---------- Lifecycle ----------
+    protected override async Task OnInitializedAsync()
+    {
+        if (UserState.UserMasterId == 0)
+            await LoadCurrentUser.RehydrateUser();
+
+        if (UserState.UserMasterId == 0)
+        {
+            Navigation.NavigateTo("Account/Login");
+            return;
+        }
+
+        IsLoading = true;
+        StateHasChanged();
+
+        await LoadCarSummariesAsync();
+
+        IsLoading = false;
+        StateHasChanged();
+    }
+
+    // ---------- Data ----------
+    private async Task LoadCarSummariesAsync()
+    {
+        try
+        {
+            CarSummaries = await Repository.GetGroupedCarSummariesAsync(UserState.CompanyMasterId);
+
+            if (!CarSummaries.Any())
+            {
+                showConfirmationModal = true;
+            }
+            else
+            {
+                SelectedCar = CarSummaries.FirstOrDefault();
+            }
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Error loading car summaries: {ex.Message}";
+        }
+    }
+
+    private async Task LoadOrderProductsAsync()
+    {
+        OrderProducts = new();
+        if (SelectedCar?.CarMasterId > 0)
+            OrderProducts = await Repository.GetOrderProductsForCarAsync(SelectedCar.CarMasterId);
+    }
+
+    // ---------- Events ----------
+    private async Task OnDetailFromChanged(DateTime? value)
+    {
+        filterFromDetail = value;
+        await EnsureValidDetailRangeAndRefresh();
+    }
+
+    private async Task OnDetailToChanged(DateTime? value)
+    {
+        filterToDetail = value;
+        await EnsureValidDetailRangeAndRefresh();
+    }
+
+    private Task EnsureValidDetailRangeAndRefresh()
+    {
+        if (filterFromDetail.HasValue && filterToDetail.HasValue && filterFromDetail.Value.Date > filterToDetail.Value.Date)
+        {
+            (filterFromDetail, filterToDetail) = (filterToDetail, filterFromDetail);
+        }
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    private void ClearDetailFilters()
+    {
+        filterFromDetail = null;
+        filterToDetail = null;
+        StateHasChanged();
+    }
+
+    private async Task ExportToExcel()
+    {
+        try
+        {
+            var masterColumns = new List<(string caption, string field)>
+            {
+                ("Car Name", nameof(SightingSummary.CarName)),
+                ("Active", nameof(SightingSummary.IsActive)),
+                ("Days Rolling", nameof(SightingSummary.DaysRolling)),
+                ("Department", nameof(SightingSummary.DepartmentName)),
+                ("Order", nameof(SightingSummary.OrderDisplay)),
+                ("Product", nameof(SightingSummary.ProductDisplay)),
+                ("Current Load/Empty", nameof(SightingSummary.CurrentLoadEmpty))
+            };
+
+            var detailColumns = new List<(string caption, string field)>
+            {
+                ("Sighting Date", nameof(SightingDetail.SightingDateFormatted)),
+                ("Sighting Time", nameof(SightingDetail.SightingTimeFormatted)),
+                ("Sighting Code", nameof(SightingDetail.SightingCodeClassification)),
+                ("Loaded/Empty", nameof(SightingDetail.LoadEmpty)),
+                ("Sighting City", nameof(SightingDetail.SightingCity)),
+                ("Sighting State", nameof(SightingDetail.SightingState)),
+                ("Rail Road", nameof(SightingDetail.Road)),
+                ("Destination State", nameof(SightingDetail.DestinationState))
+            };
+
+            var orderProdColumns = new List<(string caption, string field)>
+            {
+                ("Order", nameof(OrderProductPair.OrderName)),
+                ("Product", nameof(OrderProductPair.ProductName))
+            };
+
+            await ExcelExportService.ExportToExcelAsync(
+                "SightingReport",
+                ("Current Sightings", CarSummaries, masterColumns),
+                ($"Sighting Details for {SelectedCar?.CarName}", FilteredDetails, detailColumns),
+                ("Assigned Orders & Products", OrderProducts, orderProdColumns)
+            );
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Error exporting to Excel: {ex.Message}";
+            StateHasChanged();
+        }
+    }
+}
