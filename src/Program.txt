@@ -1,0 +1,156 @@
+using BigIronRail.Blazor.Components;
+using BigIronRail.Blazor.Components.Account;
+using BigIronRail.Blazor.Data;
+using BigIronRail.Blazor.Data.Repository;
+using BigIronRail.Blazor.HelperClasses;
+using BigIronRail.Blazor.Services;
+using Blazorise;
+using Blazorise.Bootstrap5;
+using Blazorise.Icons.FontAwesome;
+using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using NLog.Web;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// ------------------------------------------------------------
+// Logging
+// ------------------------------------------------------------
+builder.Logging.ClearProviders();
+builder.Host.UseNLog();
+
+// ------------------------------------------------------------
+// Razor Components (Blazor Server)
+// ------------------------------------------------------------
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents();
+
+// ------------------------------------------------------------
+// Identity / Auth
+// ------------------------------------------------------------
+builder.Services.AddCascadingAuthenticationState();
+builder.Services.AddScoped<IdentityUserAccessor>();
+builder.Services.AddScoped<IdentityRedirectManager>();
+builder.Services.AddScoped<AuthenticationStateProvider, IdentityRevalidatingAuthenticationStateProvider>();
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultScheme = IdentityConstants.ApplicationScheme;
+    options.DefaultSignInScheme = IdentityConstants.ExternalScheme;
+})
+.AddIdentityCookies();
+
+builder.Services.AddAuthorization();
+
+builder.Services.AddIdentityCore<ApplicationUser>(options =>
+{
+    options.SignIn.RequireConfirmedAccount = true;
+})
+.AddEntityFrameworkStores<TheDbContext>()
+.AddSignInManager()
+.AddDefaultTokenProviders();
+
+// ------------------------------------------------------------
+// App Services (DI)
+// ------------------------------------------------------------
+builder.Services.AddScoped<IRepository, Repository>();
+builder.Services.AddScoped<UserState>();
+builder.Services.AddScoped<LoadCurrentUser>();
+builder.Services.AddScoped<IUserProvisioningService, UserProvisioningService>();
+builder.Services.AddTransient<IEmailSender<ApplicationUser>, IdentityNoOpEmailSender>();
+builder.Services.AddScoped<FtpServiceController>();
+builder.Services.AddSingleton<FtpMonitorService>();
+builder.Services.AddSingleton<AppSettingsWriter>();
+builder.Services.AddSingleton<FtpBackgroundService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<FtpBackgroundService>());
+builder.Services.AddScoped<ExcelExportService>();
+
+// UI (Blazorise)
+builder.Services
+    .AddBlazorise(opt => opt.Immediate = true)
+    .AddBootstrap5Providers()
+    .AddFontAwesomeIcons();
+
+// ------------------------------------------------------------
+// EF Core
+// ------------------------------------------------------------
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+builder.Services.AddDbContext<TheDbContext>(opt => opt.UseSqlServer(connectionString));
+builder.Services.AddDatabaseDeveloperPageExceptionFilter();
+
+var app = builder.Build();
+
+// ------------------------------------------------------------
+// Pipeline
+// ------------------------------------------------------------
+if (app.Environment.IsDevelopment())
+{
+    app.UseMigrationsEndPoint();
+}
+else
+{
+    app.UseExceptionHandler("/Error", createScopeForErrors: true);
+    app.UseHsts();
+}
+
+app.UseHttpsRedirection();
+
+// Static files (wwwroot)
+app.UseStaticFiles();
+
+// ------------------------------------------------------------
+// Security Headers (basic hardening + flexible CSP)
+// ------------------------------------------------------------
+app.Use(async (ctx, next) =>
+{
+    // Basic headers
+    ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    ctx.Response.Headers["X-Frame-Options"] = "DENY";
+    ctx.Response.Headers["Referrer-Policy"] = "no-referrer";
+    ctx.Response.Headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=(), interest-cohort=()";
+
+    // Content Security Policy
+    // If you use CDNs, list them here. Keep it tight; add only what you actually use.
+    // Example CDNs for Bootstrap/Popper/FA:
+    var cspCdnHosts = new[]
+    {
+        "cdn.jsdelivr.net",
+        "cdnjs.cloudflare.com",
+        "fonts.gstatic.com",
+        "fonts.googleapis.com"
+    };
+
+    var cdnList = string.Join(" ", cspCdnHosts);
+
+    // Blazor Server needs websocket for circuit updates
+    // 'unsafe-inline' is kept for style/script to avoid breaking Bootstrap init & Blazorise inline styles.
+    // For stricter CSP, switch to nonces/hashes later.
+    var csp =
+        $"default-src 'self'; " +
+        $"img-src 'self' data:; " +
+        $"style-src 'self' 'unsafe-inline' https: {cdnList}; " +
+        $"script-src 'self' 'unsafe-inline' https: {cdnList}; " +
+        $"font-src 'self' data: https: {cdnList}; " +
+        $"connect-src 'self' wss:; " +
+        $"frame-ancestors 'none'; " +
+        $"base-uri 'self';";
+
+    ctx.Response.Headers["Content-Security-Policy"] = csp;
+
+    await next();
+});
+
+// AuthN → Anti-forgery → AuthZ
+app.UseAuthentication();
+app.UseAntiforgery();
+app.UseAuthorization();
+
+// Razor components
+app.MapRazorComponents<App>()
+   .AddInteractiveServerRenderMode();
+
+// Identity endpoints (/Account/*)
+app.MapAdditionalIdentityEndpoints();
+
+app.Run();
